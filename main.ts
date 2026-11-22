@@ -1,93 +1,83 @@
-// Push-optimal Sokoban solver (slim). Generator levels: a one-wide hallway, up to four
-// rooms off it (one door each, 3-4 boxes a room); a box pushed into the hallway never
-// returns, so the level optimum is the sum of its rooms' optima. Cut the hallway, solve
-// each room from its door with push-level A* over an admissible assignment heuristic
-// (min-cost matching of boxes to goals over true single-box push distances), stitch
-// with shortest hallway walks.
-// Node-count budgets, fixed tie order: deterministic.
+// Push-optimal Sokoban: hallway cut, per-room push A* (assignment heuristic), stitch.
 import {mkdirSync, readdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-const I = process.env.MAKEFUN_INPUT_DIR ?? '/input', O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output', LU = 'udlr', UU = 'UDLR', INF = 1 << 28;
-const PS = (t) => { const rows = t.split('\n').filter((r) => r.length), h = rows.length, w = Math.max(...rows.map((r) => r.length)), z = w * h, wall = new Uint8Array(z).fill(1), gl = [], bx = []; let pl = -1;
-  rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) { const c = row[x], i = y * w + x; if (c === '#') continue; wall[i] = 0; if ('.*+'.includes(c)) gl.push(i); if ('$*'.includes(c)) bx.push(i); if ('@+'.includes(c)) pl = i; } });
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (!x || !y || x === w - 1 || y === h - 1) wall[y * w + x] = 1;
-  return {w, z, wall, gl, bx, pl, D: [-w, w, -1, 1]}; };
-// PD: dist[g*z+s] = fewest pushes moving one box from s onto goal g, other boxes ignored.
-const PD = (L, open, goals) => { const {z, D} = L, dist = new Int32Array(z * goals.length).fill(INF), q = new Int32Array(z);
-  goals.forEach((g, gi) => { const b0 = gi * z; let hd = 0, tl = 0; q[tl++] = g; dist[b0 + g] = 0;
-    while (hd < tl) { const t = q[hd++], td = dist[b0 + t];
-      for (let d = 0; d < 4; d++) { const dd = D[d], b = t - dd, s = t - 2 * dd; if (b < 0 || b >= z || s < 0 || s >= z || !open[b] || !open[s] || dist[b0 + b] !== INF) continue; dist[b0 + b] = td + 1; q[tl++] = b; } } });
-  return dist; };
-const LV = (L, dist, ng) => { const live = new Uint8Array(L.z); for (let s = 0; s < L.z; s++) for (let g = 0; g < ng; g++) if (dist[g * L.z + s] < INF) { live[s] = 1; break; } return live; };
-const WK = (L, open, occ, from, to) => { if (from === to) return '';
-  const {z, D} = L, prev = new Int32Array(z).fill(-1), q = new Int32Array(z); let hd = 0, tl = 0; q[tl++] = from; prev[from] = from * 4;
-  while (hd < tl) { const p = q[hd++]; if (p === to) break; for (let d = 0; d < 4; d++) { const n = p + D[d]; if (n < 0 || n >= z || !open[n] || occ[n] || prev[n] !== -1) continue; prev[n] = p * 4 + d; q[tl++] = n; } }
-  if (prev[to] === -1) return null; let s = ''; for (let p = to; p !== from; p = prev[p] >> 2) s = LU[prev[p] & 3] + s; return s; };
-const PM = (n) => { const o = [], c = [], u = new Array(n).fill(false); const rec = () => { if (c.length === n) { o.push(c.slice()); return; } for (let i = 0; i < n; i++) if (!u[i]) { u[i] = true; c.push(i); rec(); c.pop(); u[i] = false; } }; rec(); return o; };
-// SP: push-level A* on one room board; returns the push-optimal move string or null.
-const SP = (L, open, bx0, goals, pl0) => { const {z, D} = L, k = bx0.length;
-  const dist = PD(L, open, goals), pm = PM(k);
-  const heur = (bx) => { let best = INF; for (const p of pm) { let s = 0; for (let i = 0; i < k; i++) { const d = dist[p[i] * z + bx[i]]; if (d >= INF) { s = INF; break; } s += d; } if (s < best) best = s; } return best; };
-  const h0 = heur(bx0); if (h0 >= INF) return null;
-  const sC = new Int32Array(z), sN = new Int32Array(z), st = new Int32Array(z), occ = new Uint8Array(z); let tC = 0, tN = 0;
-  const flood = (seen, stamp, from) => { let n = 0, low = from; st[n++] = from; seen[from] = stamp;
-    while (n) { const p = st[--n]; if (p < low) low = p; for (let d = 0; d < 4; d++) { const q = p + D[d]; if (q < 0 || q >= z || !open[q] || occ[q] || seen[q] === stamp) continue; seen[q] = stamp; st[n++] = q; } } return low; };
-  const keyOf = (bx, low) => { let key = low; for (const b of bx) key = key * z + b; return key; };
-  const NB = [bx0.slice()], NP = [pl0], NG = [0], PA = [-1], best = new Map();
-  for (const b of bx0) occ[b] = 1; best.set(keyOf(bx0, flood(sN, ++tN, pl0)), 0); for (const b of bx0) occ[b] = 0;
-  const BQ = []; let bf = h0; // bucket queue on f = g + h, which never decreases along a path
-  const push = (f, n) => { (BQ[f] ??= []).push(n); if (f < bf) bf = f; };
-  push(bf, 0);
-  let found = -1;
-  while (found < 0) { while (bf < BQ.length && (!BQ[bf] || !BQ[bf].length)) bf++; if (bf >= BQ.length) break;
-    const s = BQ[bf].pop(), bx = NB[s], g = NG[s];
-    if (bx.every((b) => goals.includes(b))) { found = s; break; }
-    for (const b of bx) occ[b] = 1; flood(sC, ++tC, NP[s]); const here = tC;
-    for (let bi = 0; bi < k; bi++) { const b = bx[bi];
-      for (let d = 0; d < 4; d++) { const dd = D[d], stand = b - dd, t = b + dd;
-        if (stand < 0 || stand >= z || t < 0 || t >= z || sC[stand] !== here || !open[t] || occ[t]) continue;
-        occ[b] = 0; occ[t] = 1; const nx = bx.slice(); nx[bi] = t; nx.sort((a, c) => a - c); const key = keyOf(nx, flood(sN, ++tN, b)); occ[t] = 0; occ[b] = 1;
-        const ng = g + 1, sg = best.get(key); if (sg !== undefined && sg <= ng) continue;
-        if (NB.length >= 1e6) { for (const x of bx) occ[x] = 0; return null; }
-        best.set(key, ng); const id = NB.length; NB.push(nx); NP.push(b); NG.push(ng); PA.push(s);
-        const hh = heur(nx); if (hh < INF) push(ng + hh, id); } }
-    for (const x of bx) occ[x] = 0; }
-  if (found < 0) return null;
-  const path = []; for (let s = found; s > 0; s = PA[s]) path.push(s); path.reverse();
-  let moves = '', pl = pl0, bx = bx0;
-  for (const s of path) { const nx = NB[s], from = bx.find((b) => !nx.includes(b)), to = nx.find((b) => !bx.includes(b)), dd = to - from;
-    for (const b of bx) occ[b] = 1; const wk = WK(L, open, occ, pl, from - dd); for (const b of bx) occ[b] = 0;
-    if (wk === null) return null; moves += wk + UU[D.indexOf(dd)]; pl = from; bx = nx; }
-  return moves; };
-// RM: cut the hallway row's dead squares; each part holding boxes is a room, entry = hallway square beyond its door.
-const RM = (L) => { const {w, z, wall, gl, bx, pl, D} = L, open = new Uint8Array(z);
-  for (let s = 0; s < z; s++) open[s] = wall[s] ? 0 : 1;
-  L.ao = open;
-  const live = LV(L, PD(L, open, gl), gl.length), row = Math.floor(pl / w), cut = new Uint8Array(z);
-  for (let x = 0; x < w; x++) { const i = row * w + x; if (!wall[i] && !live[i]) cut[i] = 1; }
-  if (bx.some((b) => cut[b] === 1)) return null;
-  const part = new Int32Array(z).fill(-1), rooms = [], st = [];
-  for (let s = 0; s < z; s++) { if (wall[s] || cut[s] || part[s] >= 0) continue;
-    const id = rooms.length, sq = []; part[s] = id; st.push(s);
-    while (st.length) { const p = st.pop(); sq.push(p); for (let d = 0; d < 4; d++) { const q = p + D[d]; if (q < 0 || q >= z || wall[q] || cut[q] || part[q] >= 0) continue; part[q] = id; st.push(q); } }
-    rooms.push({sq, bx: [], gl: [], entry: -1}); }
-  for (const b of bx) { if (part[b] < 0) return null; rooms[part[b]].bx.push(b); }
-  for (const g of gl) { if (part[g] < 0) return null; rooms[part[g]].gl.push(g); }
-  const kept = [];
-  for (const r of rooms) { if (!r.bx.length) continue; if (r.bx.length !== r.gl.length) return null; r.sq.sort((a, b) => a - b);
-    for (const s of r.sq) { for (let d = 0; d < 4; d++) { const q = s + D[d]; if (q >= 0 && q < z && Math.floor(q / w) === row && !wall[q]) { r.entry = q; break; } } if (r.entry >= 0) break; }
-    if (r.entry < 0) return null; kept.push(r); }
-  return kept; };
-const BR = (L, rooms) => { const {z} = L;
-  const set = new Set(L.bx), occ = new Uint8Array(z); let pl = L.pl, mv = '';
-  for (const r of rooms) { for (const b of set) occ[b] = 1; const wk = WK(L, L.ao, occ, pl, r.entry); for (const b of set) occ[b] = 0;
-    if (wk === null) return null; mv += wk; pl = r.entry;
-    const open = new Uint8Array(z); for (const s of r.sq) open[s] = 1; open[r.entry] = 1;
-    const sol = SP(L, open, r.bx, r.gl, r.entry);
-    if (sol === null) return null; mv += sol;
-    let p = pl; for (const ch of sol) { const d = LU.indexOf(ch.toLowerCase()); if (d < 0) continue; const q = p + L.D[d]; if (set.has(q)) { set.delete(q); set.add(q + L.D[d]); } p = q; } pl = p;
-    if (!r.gl.every((g) => set.has(g))) return null; }
-  return L.gl.every((g) => set.has(g)) ? mv : null; };
-for (const id of readdirSync(I).sort()) { const L = PS(readFileSync(join(I, id, 'level.txt'), 'utf8')); let mv = '';
-  if (L.bx.length && L.pl >= 0) { const rooms = RM(L); if (rooms && rooms.length) { const m = BR(L, rooms); if (m !== null) mv = m; } }
-  mkdirSync(join(O, id), {recursive: true}); writeFileSync(join(O, id, 'solution.txt'), mv + '\n'); }
+const I=process.env.MAKEFUN_INPUT_DIR??'/input',O=process.env.MAKEFUN_OUTPUT_DIR??'/output',LU='udlr',UU='UDLR',X=1<<28;
+const PS=t=>{const r=t.split('\n').filter(e=>e.length),h=r.length,w=Math.max(...r.map(e=>e.length)),z=w*h,a=new Uint8Array(z).fill(1),g=[],b=[];let p=-1;
+r.forEach((e,y)=>{for(let x=0;x<e.length;x++){const c=e[x],i=y*w+x;if(c=='#')continue;a[i]=0;if('.*+'.includes(c))g.push(i);if('$*'.includes(c))b.push(i);if('@+'.includes(c))p=i}});
+for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(!x||!y||x==w-1||y==h-1)a[y*w+x]=1;
+return{w,z,a,g,b,p,D:[-w,w,-1,1],q:new Int32Array(z)};};
+const PD=(L,o,G)=>{const{z,D,q}=L,d=new Int32Array(z*G.length).fill(X);
+G.forEach((g,gi)=>{const b0=gi*z;let hd=0,tl=0;q[tl++]=g;d[b0+g]=0;
+while(hd<tl){const t=q[hd++],v=d[b0+t];
+for(let e=0;e<4;e++){const dd=D[e],b=t-dd,s=t-2*dd;if(b<0||b>=z||s<0||s>=z||!o[b]||!o[s]||d[b0+b]!==X)continue;d[b0+b]=v+1;q[tl++]=b}}});
+return d;};
+const PM=n=>{const o=[],c=[],u=new Array(n).fill(false);const f=()=>{if(c.length==n){o.push(c.slice());return}for(let i=0;i<n;i++)if(!u[i]){u[i]=true;c.push(i);f();c.pop();u[i]=false}};f();return o};
+const WK=(L,o,c,F,T)=>{if(F==T)return'';
+const{z,D,q}=L,v=new Int32Array(z).fill(-1);let hd=0,tl=0;q[tl++]=F;v[F]=F*4;
+while(hd<tl){const p=q[hd++];if(p==T)break;for(let e=0;e<4;e++){const n=p+D[e];if(n<0||n>=z||!o[n]||c[n]||v[n]!==-1)continue;v[n]=p*4+e;q[tl++]=n}}
+if(v[T]===-1)return null;let s='';for(let p=T;p!==F;p=v[p]>>2)s=LU[v[p]&3]+s;return s;};
+const SP=(L,o,B,G,P0)=>{const{z,D,q}=L,k=B.length,d=PD(L,o,G),pm=PM(k);
+const H=b=>{let s=X;for(const p of pm){let v=0;for(let i=0;i<k;i++){const e=d[p[i]*z+b[i]];if(e>=X){v=X;break}v+=e}if(v<s)s=v}return s};
+const h0=H(B);if(h0>=X)return null;
+const C=new Int32Array(z),N=new Int32Array(z),c=new Uint8Array(z);let tC=0,tN=0;
+const FL=(s2,m,F)=>{let n=0,l=F;q[n++]=F;s2[F]=m;
+while(n){const p=q[--n];if(p<l)l=p;for(let e=0;e<4;e++){const u=p+D[e];if(u<0||u>=z||!o[u]||c[u]||s2[u]===m)continue;s2[u]=m;q[n++]=u}}return l};
+const KY=(b,l)=>{let y=l;for(const e of b)y=y*z+e;return y};
+const NB=[B.slice()],NP=[P0],NG=[0],PA=[-1],bs=new Map();
+for(const e of B)c[e]=1;bs.set(KY(B,FL(N,++tN,P0)),0);for(const e of B)c[e]=0;
+const Q=[];let bf=h0;
+const PU=(f,n)=>{(Q[f]??=[]).push(n);if(f<bf)bf=f};
+PU(bf,0);
+let fd=-1;
+while(fd<0){while(bf<Q.length&&(!Q[bf]||!Q[bf].length))bf++;if(bf>=Q.length)break;
+const s=Q[bf].pop(),b=NB[s],g=NG[s];
+if(b.every(e=>G.includes(e))){fd=s;break}
+for(const e of b)c[e]=1;FL(C,++tC,NP[s]);
+for(let bi=0;bi<k;bi++){const e=b[bi];
+for(let j=0;j<4;j++){const dd=D[j],sd=e-dd,t=e+dd;
+if(sd<0||sd>=z||t<0||t>=z||C[sd]!==tC||!o[t]||c[t])continue;
+c[e]=0;c[t]=1;const nx=b.slice();nx[bi]=t;nx.sort((u,v)=>u-v);const ky=KY(nx,FL(N,++tN,e));c[t]=0;c[e]=1;
+const ng=g+1,sg=bs.get(ky);if(sg!==undefined&&sg<=ng)continue;
+if(NB.length>=1e6){for(const u of b)c[u]=0;return null}
+bs.set(ky,ng);const id=NB.length;NB.push(nx);NP.push(e);NG.push(ng);PA.push(s);
+const hh=H(nx);if(hh<X)PU(ng+hh,id)}}
+for(const e of b)c[e]=0}
+if(fd<0)return null;
+const pt=[];for(let s=fd;s>0;s=PA[s])pt.push(s);pt.reverse();
+let mv='',pl=P0,b=B;
+for(const s of pt){const nx=NB[s],F=b.find(e=>!nx.includes(e)),T=nx.find(e=>!b.includes(e)),dd=T-F;
+for(const e of b)c[e]=1;const wk=WK(L,o,c,pl,F-dd);for(const e of b)c[e]=0;
+if(wk===null)return null;mv+=wk+UU[D.indexOf(dd)];pl=F;b=nx}
+return mv;};
+const RM=L=>{const{w,z,a,g,b,p,D,q}=L,o=new Uint8Array(z);
+for(let s=0;s<z;s++)o[s]=a[s]?0:1;
+L.ao=o;
+const d=PD(L,o,g),lv=new Uint8Array(z);
+for(let s=0;s<z;s++)for(let e=0;e<g.length;e++)if(d[e*z+s]<X){lv[s]=1;break}
+const rw=Math.floor(p/w),ct=new Uint8Array(z);
+for(let x=0;x<w;x++){const i=rw*w+x;if(!a[i]&&!lv[i])ct[i]=1}
+if(b.some(e=>ct[e]===1))return null;
+const pt=new Int32Array(z).fill(-1),rs=[];
+for(let s=0;s<z;s++){if(a[s]||ct[s]||pt[s]>=0)continue;
+const id=rs.length,sq=[];let tn=0;pt[s]=id;q[tn++]=s;
+while(tn){const u=q[--tn];sq.push(u);for(let e=0;e<4;e++){const n=u+D[e];if(n<0||n>=z||a[n]||ct[n]||pt[n]>=0)continue;pt[n]=id;q[tn++]=n}}
+rs.push({sq,b:[],g:[],en:-1})}
+for(const e of b){if(pt[e]<0)return null;rs[pt[e]].b.push(e)}
+for(const e of g){if(pt[e]<0)return null;rs[pt[e]].g.push(e)}
+const kp=[];
+for(const r of rs){if(!r.b.length)continue;if(r.b.length!==r.g.length)return null;r.sq.sort((u,v)=>u-v);
+for(const s of r.sq){for(let e=0;e<4;e++){const u=s+D[e];if(u>=0&&u<z&&Math.floor(u/w)===rw&&!a[u]){r.en=u;break}}if(r.en>=0)break}
+if(r.en<0)return null;kp.push(r)}
+return kp;};
+const BR=(L,rs)=>{const{z}=L,set=new Set(L.b),c=new Uint8Array(z);let pl=L.p,mv='';
+for(const r of rs){for(const e of set)c[e]=1;const wk=WK(L,L.ao,c,pl,r.en);for(const e of set)c[e]=0;
+if(wk===null)return null;mv+=wk;pl=r.en;
+const o=new Uint8Array(z);for(const s of r.sq)o[s]=1;o[r.en]=1;
+const sl=SP(L,o,r.b,r.g,r.en);
+if(sl===null)return null;mv+=sl;
+let p=pl;for(const ch of sl){const e=LU.indexOf(ch.toLowerCase());if(e<0)continue;const u=p+L.D[e];if(set.has(u)){set.delete(u);set.add(u+L.D[e])}p=u}pl=p;
+if(!r.g.every(e=>set.has(e)))return null}
+return L.g.every(e=>set.has(e))?mv:null;};
+for(const id of readdirSync(I).sort()){const L=PS(readFileSync(join(I,id,'level.txt'),'utf8'));let mv='';
+if(L.b.length&&L.p>=0){const rs=RM(L);if(rs&&rs.length){const m=BR(L,rs);if(m!==null)mv=m}}
+mkdirSync(join(O,id),{recursive:true});writeFileSync(join(O,id,'solution.txt'),mv+'\n')}

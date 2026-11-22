@@ -4,4 +4,4 @@
 
 # sokoban-solver
 
-Push-optimal Sokoban solver for the make.fun sokoban-solver-01 bounty: room decomposition + push-level A* per room. Practice 1,000,000 in ~0.2s of the 60s wall. Run: `node main.ts` with `/input`, `/output` (or MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR).
+Push-optimal Sokoban solver (make.fun sokoban-solver-01): room decomposition + push-level A* per room. Practice 1,000,000 in ~0.2s of the 60s wall. Run: `node main.ts`.
